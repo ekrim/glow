@@ -11,7 +11,14 @@ from torch.nn.parameter import Parameter
 from .data import get_data
 
 
-def train(param, dataloader):
+def train(param, x, y):
+
+  dataloader = DataLoader(
+    torch.from_numpy(x.astype(np.float32)),
+    batch_size=param.batch_size,
+    shuffle=True,
+    num_workers=2
+  )
 
   nets = lambda: nn.Sequential(
     nn.Linear(2, 256), 
@@ -30,18 +37,18 @@ def train(param, dataloader):
 
   masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
   prior = distributions.MultivariateNormal(torch.zeros(2), torch.eye(2))
+
   flow = RealNVP(nets, nett, masks, prior)
   flow.to(device)
+  flow.train()
 
   optimizer = torch.optim.Adam([p for p in flow.parameters() if p.requires_grad==True], lr=param.lr)
-
-  flow.train()
 
   it = 0 
   while it < param.total_it:
 
     for i, data in enumerate(dataloader):
-      loss = -flow.log_prob(data[).mean()
+      loss = -flow.log_prob(data).mean()
     
       optimizer.zero_grad()
       loss.backward(retain_graph=True)
@@ -94,7 +101,7 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_arugment('--dataset', default='lendingclub', help='dataset to use')
   parser.add_argument('--batch_size', default=64, help='batch size')
-  parser.add_argument('--total_it', default=1, help='number of training samples')
+  parser.add_argument('--total_it', default=10000, help='number of training samples')
   parser.add_argument('--lr', default=1e-4, help='learning rate')
 
   args = parser.parse_args(sys.argv[1:])
