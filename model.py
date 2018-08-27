@@ -13,7 +13,7 @@ from sklearn import datasets
 from zamlexplain.data import load_data
 
 
-PRINT_FREQ = 1000   # print loss every __ samples seen
+PRINT_FREQ = 2000   # print loss every __ samples seen
 
 
 def train(param, x, y):
@@ -44,8 +44,13 @@ def train(param, x, y):
     nn.LeakyReLU(), 
     nn.Linear(256, dim_in))
 
-  masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
-  prior = distributions.MultivariateNormal(torch.zeros(2).to(device), torch.eye(2).to(device))
+  if dim_in > 2:
+    masks = torch.from_numpy(np.random.randint(0, 2, (8, dim_in)).astype(np.float32))
+    print(masks)
+  else:
+    masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
+
+  prior = distributions.MultivariateNormal(torch.zeros(dim_in).to(device), torch.eye(dim_in).to(device))
 
   flow = RealNVP(nets, nett, masks, prior, device)
   flow.to(device)
@@ -71,6 +76,11 @@ def train(param, x, y):
         print_cnt = 0
 
     torch.save(flow.state_dict(), 'flow_model.pytorch')
+
+
+  # produce samples
+  x_gen = flow.g(flow.prior.sample((100,))).detach().cpu().numpy()
+  return x_gen
 
 
 class RealNVP(nn.Module):
@@ -116,17 +126,25 @@ class RealNVP(nn.Module):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--dataset', default='lendingclub', help='dataset to use')
-  parser.add_argument('--batch_size', default=64, help='batch size')
-  parser.add_argument('--total_it', default=10000, help='number of training samples')
-  parser.add_argument('--lr', default=1e-4, help='learning rate')
+  parser.add_argument('--batch_size', default=64, type=int, help='batch size')
+  parser.add_argument('--total_it', default=10000, type=int, help='number of training samples')
+  parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
 
   args = parser.parse_args(sys.argv[1:])
 
   if args.dataset == 'lendingclub':
     x, y, scaler = load_data('lendingclub', is_tree=False, scaler_type='standardize')
+    x = np.concatenate([x, np.zeros(x.shape[0])[:,None]], axis=1)
       
   else:
     x, y = datasets.make_moons(n_samples=30000, noise=0.05)
-    x = x.astype(np.float32)
+  x = x.astype(np.float32)
 
-  train(args, x, y)
+  x_gen = train(args, x, y)
+  if x.shape[1] == 2:
+    plt.plot(x_gen[:,0], x_gen[:,1], '.')
+    plt.show()
+  else:
+    np.save('samples.npy', x_gen)
+
+  print(scaler.as_dataframe(x_gen))
