@@ -1,17 +1,26 @@
+import sys
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch import distributions
 from torch.nn.parameter import Parameter
+from sklearn import datasets
 
-from .data import get_data
+from zamlexplain.data import load_data
+
+
+PRINT_FREQ = 1000   # print loss every __ samples seen
 
 
 def train(param, x, y):
+
+  dim_in = x.shape[1]
+  device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+  print(device)
 
   dataloader = DataLoader(
     torch.from_numpy(x.astype(np.float32)),
@@ -21,49 +30,56 @@ def train(param, x, y):
   )
 
   nets = lambda: nn.Sequential(
-    nn.Linear(2, 256), 
+    nn.Linear(dim_in, 256), 
     nn.LeakyReLU(), 
     nn.Linear(256, 256), 
     nn.LeakyReLU(), 
-    nn.Linear(256, 2), 
+    nn.Linear(256, dim_in), 
     nn.Tanh())
 
   nett = lambda: nn.Sequential(
-    nn.Linear(2, 256), 
+    nn.Linear(dim_in, 256), 
     nn.LeakyReLU(), 
     nn.Linear(256, 256), 
     nn.LeakyReLU(), 
-    nn.Linear(256, 2))
+    nn.Linear(256, dim_in))
 
   masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
-  prior = distributions.MultivariateNormal(torch.zeros(2), torch.eye(2))
+  prior = distributions.MultivariateNormal(torch.zeros(2).to(device), torch.eye(2).to(device))
 
-  flow = RealNVP(nets, nett, masks, prior)
+  flow = RealNVP(nets, nett, masks, prior, device)
   flow.to(device)
   flow.train()
 
   optimizer = torch.optim.Adam([p for p in flow.parameters() if p.requires_grad==True], lr=param.lr)
 
-  it = 0 
+  it, print_cnt = 0, 0 
   while it < param.total_it:
 
     for i, data in enumerate(dataloader):
-      loss = -flow.log_prob(data).mean()
+     
+      loss = -flow.log_prob(data.to(device)).mean()
     
       optimizer.zero_grad()
       loss.backward(retain_graph=True)
       optimizer.step()
-    
-      if t % 500 == 0:
-        print('iter %s:' % t, 'loss = %.3f' % loss)
+      
+      it += data.shape[0]
+      print_cnt += data.shape[0]
+      if print_cnt > PRINT_FREQ:
+        print('it {:d} -- loss {:.03f}'.format(it, loss))
+        print_cnt = 0
+
+    torch.save(flow.state_dict(), 'flow_model.pytorch')
 
 
 class RealNVP(nn.Module):
-  def __init__(self, nets, nett, mask, prior):
+  def __init__(self, nets, nett, masks, prior, device):
     super(RealNVP, self).__init__()
     
+    self.device = device
     self.prior = prior
-    self.mask = nn.Parameter(mask, requires_grad=False)
+    self.mask = nn.Parameter(masks, requires_grad=False)
     self.t = torch.nn.ModuleList([nett() for _ in range(len(masks))])
     self.s = torch.nn.ModuleList([nets() for _ in range(len(masks))])
     
@@ -86,7 +102,7 @@ class RealNVP(nn.Module):
       log_det_J -= s.sum(dim=1)
     return z, log_det_J
   
-  def log_prob(self,x):
+  def log_prob(self, x):
     z, logp = self.f(x)
     return self.prior.log_prob(z) + logp
     
@@ -99,11 +115,18 @@ class RealNVP(nn.Module):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_arugment('--dataset', default='lendingclub', help='dataset to use')
+  parser.add_argument('--dataset', default='lendingclub', help='dataset to use')
   parser.add_argument('--batch_size', default=64, help='batch size')
   parser.add_argument('--total_it', default=10000, help='number of training samples')
   parser.add_argument('--lr', default=1e-4, help='learning rate')
 
   args = parser.parse_args(sys.argv[1:])
-  dataloader = get_data(param.dataset)
-  train(args, dataloader)
+
+  if args.dataset == 'lendingclub':
+    x, y, scaler = load_data('lendingclub', is_tree=False, scaler_type='standardize')
+      
+  else:
+    x, y = datasets.make_moons(n_samples=30000, noise=0.05)
+    x = x.astype(np.float32)
+
+  train(args, x, y)
