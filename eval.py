@@ -58,6 +58,27 @@ def categorical_check(df, scaler):
   return pd.DataFrame(OrderedDict({'var pref': pref_list, '% good OHEu': pct_good})).round(0)
 
 
+def un_ohe(df, scaler):
+  df = df.copy()
+  cat_cols = [cat_idx for cat_idx in scaler.cat_cols if len(cat_idx) > 1]
+  for cat_idx in cat_cols:
+    pref, suffs = get_pref(scaler.columns[cat_idx])
+    suffs = np.array(suffs)
+    df[pref] = suffs[np.argmax(df.iloc[:, cat_idx].as_matrix(), axis=1)]
+
+  cat_arr = np.array(reduce(lambda x,y: x+y, cat_cols))
+  return df.drop(labels=scaler.columns[cat_arr], axis=1)
+
+
+def drop_static(df):
+  df = df.copy()
+  to_drop = []
+  for i in range(df.shape[1]):
+    if len(df.iloc[:,i].unique()) == 1:
+      to_drop += [i]
+  return df.drop(labels=df.columns[to_drop], axis=1)
+    
+
 def get_pref(lst):
   if len(lst) == 1:
     pref = lst[0]
@@ -69,7 +90,7 @@ def get_pref(lst):
 
     pref = lst[0][:cnt]
     suffs = [el[cnt:] for el in lst]
-  return pref, suffs
+  return pref.rstrip('_'), suffs
 
 
 def categorical_hist(df_x, df_gen, scaler):
@@ -117,12 +138,11 @@ if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--model', default='flow_model.pytorch', help='training RealNVP model')
   parser.add_argument('--n_samples', default=10000, type=int, help='number of samples to use for reconstruction quality tests')
+  parser.add_argument('--quality', action='store_true', help='run reconstruction quality tests')
+  parser.add_argument('--sensitivity', action='store_true', help='run sensitivity tests')
+  parser.add_argument('--improvement', action='store_true', help='run score improvement tests')
   
   args = parser.parse_args(sys.argv[1:])
-
-  quality_test = False
-  sensitivity_test = False
-  improvement_test = True
 
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') 
 
@@ -147,7 +167,7 @@ if __name__ == '__main__':
   print(df_gen.head(20).iloc[:, 17:])
 
   # reconstruction quality ---------------------
-  if quality_test:
+  if args.quality:
     # check means vs. sd
     df_mean, df_sd = mean_sd(df_x, df_gen)
     print(df_mean)
@@ -179,7 +199,7 @@ if __name__ == '__main__':
   inf_fn = lambda x: flow.f(torch.from_numpy(x.astype(np.float32)).to(device))[0].detach().cpu().numpy()
   gen_fn = lambda z: flow.g(torch.from_numpy(z.astype(np.float32)).to(device)).detach().cpu().numpy()
 
-  if sensitivity_test: 
+  if args.sensitivity: 
     i = num_train+1
     noise_sd = 0.01
     n_nbhrs = 100
@@ -204,7 +224,7 @@ if __name__ == '__main__':
     print('shap top 10')
     print(shap)
 
-  if improvement_test:
+  if args.improvement:
     z = inf_fn(x)
     mean0 = np.mean(z[y==0], axis=0)
     mean1 = np.mean(z[y==1], axis=0)
@@ -215,14 +235,16 @@ if __name__ == '__main__':
     lowest_idx = np.argsort(pred)[:100]
     rej_idx = np.random.choice(lowest_idx)
     z_rej = inf_fn(x[rej_idx][None,:])
-    improve_vec = mean1 - x[rej_idx]
+    improve_vec = mean1 - z_rej.flatten()
    
-    alpha = np.linspace(0, 0.1, 10)
+    alpha = np.linspace(0, 0.2, 10)
     z_path = z_rej + alpha[:,None] * improve_vec[None,:]
     x_path = gen_fn(z_path)
     score_path = pred_fn(x_path)
 
-    print(scaler.as_dataframe(x_path[:,:-1]))
-    plt.plot(alpha, score_path, '.')
+    print(drop_static(un_ohe(scaler.as_dataframe(x_path[:,:-1]), scaler)))
+    plt.plot(alpha, score_path, '.-')
+    plt.title('Score improvement plan for sample {:d}'.format(rej_idx))
+    plt.ylabel('XGB model score')
 
   plt.show()
