@@ -52,7 +52,7 @@ def categorical_check(df, scaler):
     pref_list += [get_pref(scaler.columns[cat_idx])[0].rstrip('_')]
 
   pct_good = 100*(df.shape[0] - np.array(good_ohe))/df.shape[0]
-  return pd.DataFrame(OrderedDict({'var pref': pref_list, '% good ohe': pct_good})).round(0)
+  return pd.DataFrame(OrderedDict({'var pref': pref_list, '% good OHEu': pct_good})).round(0)
 
 
 def get_pref(lst):

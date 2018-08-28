@@ -6,24 +6,31 @@ import torch.nn as nn
 class RealNVP(nn.Module):
   def __init__(self, dim_in, device):
     super(RealNVP, self).__init__()
+
+    n_hid = 256
+    n_mask = 6
     
     nets = lambda: nn.Sequential(
-      nn.Linear(dim_in, 256), 
+      nn.Linear(dim_in, n_hid), 
       nn.LeakyReLU(), 
-      nn.Linear(256, 256), 
+      nn.BatchNorm1d(n_hid),
+      nn.Linear(n_hid, n_hid), 
       nn.LeakyReLU(), 
-      nn.Linear(256, dim_in), 
+      nn.BatchNorm1d(n_hid),
+      nn.Linear(n_hid, dim_in), 
       nn.Tanh())
 
     nett = lambda: nn.Sequential(
-      nn.Linear(dim_in, 256), 
+      nn.Linear(dim_in, n_hid), 
       nn.LeakyReLU(), 
-      nn.Linear(256, 256), 
+      nn.BatchNorm1d(n_hid),
+      nn.Linear(n_hid, n_hid), 
       nn.LeakyReLU(), 
-      nn.Linear(256, dim_in))
+      nn.BatchNorm1d(n_hid),
+      nn.Linear(n_hid, dim_in))
 
     if dim_in > 2:
-      masks = torch.from_numpy(np.random.randint(0, 2, (8, dim_in)).astype(np.float32))
+      masks = torch.from_numpy(np.random.randint(0, 2, (n_mask, dim_in)).astype(np.float32))
       print(masks)
     else:
       masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
