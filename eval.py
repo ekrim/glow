@@ -5,6 +5,9 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import xgboost as xgb
+from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import Ridge
 import torch
 import torch.nn as nn
 
@@ -113,8 +116,13 @@ def payment_error(df):
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument('--model', default='flow_model.pytorch', help='training RealNVP model')
+  parser.add_argument('--n_samples', default=10000, type=int, help='number of samples to use for reconstruction quality tests')
   
   args = parser.parse_args(sys.argv[1:])
+
+  quality_test = False
+  sensitivity_test = False
+  improvement_test = True
 
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') 
 
@@ -122,13 +130,13 @@ if __name__ == '__main__':
   x = np.concatenate([x, np.zeros((x.shape[0], 1))], axis=1).astype(np.float32)
   
   flow = RealNVP(x.shape[1], device) 
-  flow.load_state_dict(torch.load(args.model))
+  flow.load_state_dict(torch.load(args.model, map_location=device))
   flow.to(device)
   flow.eval()
   print(flow.mask)
 
   # produce samples
-  x_gen = flow.g(flow.prior.sample((10000,))).detach().cpu().numpy()[:,:-1]
+  x_gen = flow.g(flow.prior.sample((args.n_samples,))).detach().cpu().numpy()[:,:-1]
   np.save('samples.npy', x_gen)
 
   df_x = scaler.as_dataframe(x[:,:-1])
@@ -138,21 +146,83 @@ if __name__ == '__main__':
   print(df_gen.head(20).iloc[:,:17])
   print(df_gen.head(20).iloc[:, 17:])
 
-  # check means vs. sd
-  df_mean, df_sd = mean_sd(df_x, df_gen)
-  print(df_mean)
-  print(df_sd)
+  # reconstruction quality ---------------------
+  if quality_test:
+    # check means vs. sd
+    df_mean, df_sd = mean_sd(df_x, df_gen)
+    print(df_mean)
+    print(df_sd)
 
-  # check negative values
-  print(negative_check(df_gen))
-  
-  # check categorical
-  print(categorical_check(df_gen, scaler))
+    # check negative values
+    print(negative_check(df_gen))
+    
+    # check categorical
+    print(categorical_check(df_gen, scaler))
 
-  # check categorical hist
-  categorical_hist(df_x, df_gen, scaler)
+    # check categorical hist
+    categorical_hist(df_x, df_gen, scaler)
 
-  # check payment calculation error
-  payment_error(df_gen)
+    # check payment calculation error
+    payment_error(df_gen)
+
+  # build a model
+  param = {'max_depth': 4, 'silent': 1, 'objective': 'binary:logistic'}
+  num_round = 20
+  num_train = 35000
+  bst = xgb.train(param, xgb.DMatrix(x[:num_train], label=y[:num_train]), num_round)
+  pred_val = bst.predict(xgb.DMatrix(x[num_train:]))
+  val_auc = roc_auc_score(y[num_train:], pred_val)
+  print('auc score on val set: {:.03f}'.format(val_auc))
+
+  pred_fn = lambda x: bst.predict(xgb.DMatrix(x))
+  shap_fn = lambda x: bst.predict(xgb.DMatrix(x), pred_contribs=True)
+  inf_fn = lambda x: flow.f(torch.from_numpy(x.astype(np.float32)).to(device))[0].detach().cpu().numpy()
+  gen_fn = lambda z: flow.g(torch.from_numpy(z.astype(np.float32)).to(device)).detach().cpu().numpy()
+
+  if sensitivity_test: 
+    i = num_train+1
+    noise_sd = 0.01
+    n_nbhrs = 100
+    x_test = x[i][None,:]
+    z_test = inf_fn(x_test) 
+    z_nbhr = z_test + noise_sd * np.random.randn(n_nbhrs, x.shape[1]).astype(np.float32)
+    x_nbhr = gen_fn(z_nbhr) 
+    pred_nbhr = pred_fn(x_nbhr)
+    pred_test = pred_fn(x_test)
+    shap_values = shap_fn(x_test)[0][:-2]
+
+    # PI
+
+    # LIME
+    mod = Ridge(alpha=0.1, fit_intercept=True, normalize=True)
+    mod.fit(x_nbhr, pred_nbhr.flatten())
+    sensitivity = scaler.columns[np.argsort(-np.abs(mod.coef_[:-1]))][:10]
+
+    shap = scaler.columns[np.argsort(-np.abs(shap_values))][:10]
+    print('sensitivity top 10')
+    print(sensitivity)
+    print('shap top 10')
+    print(shap)
+
+  if improvement_test:
+    z = inf_fn(x)
+    mean0 = np.mean(z[y==0], axis=0)
+    mean1 = np.mean(z[y==1], axis=0)
+    improve_vec = mean1 - mean0
+    
+    pred = pred_fn(x)
+
+    lowest_idx = np.argsort(pred)[:100]
+    rej_idx = np.random.choice(lowest_idx)
+    z_rej = inf_fn(x[rej_idx][None,:])
+    improve_vec = mean1 - x[rej_idx]
+   
+    alpha = np.linspace(0, 0.1, 10)
+    z_path = z_rej + alpha[:,None] * improve_vec[None,:]
+    x_path = gen_fn(z_path)
+    score_path = pred_fn(x_path)
+
+    print(scaler.as_dataframe(x_path[:,:-1]))
+    plt.plot(alpha, score_path, '.')
 
   plt.show()
