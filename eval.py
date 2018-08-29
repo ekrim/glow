@@ -139,21 +139,25 @@ if __name__ == '__main__':
   parser.add_argument('--model', default='flow_model.pytorch', help='training RealNVP model')
   parser.add_argument('--n_samples', default=10000, type=int, help='number of samples to use for reconstruction quality tests')
   parser.add_argument('--quality', action='store_true', help='run reconstruction quality tests')
-  parser.add_argument('--sensitivity', action='store_true', help='run sensitivity tests')
-  parser.add_argument('--improvement', action='store_true', help='run score improvement tests')
+  parser.add_argument('--sensitivity', action='store_true', help='run sensitivity demo')
+  parser.add_argument('--improvement', action='store_true', help='run score improvement demo')
+  parser.add_argument('--likelihood', action='store_true', help='run log likelihood monitoring demo')
   
   args = parser.parse_args(sys.argv[1:])
 
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') 
+  print(device)
 
   x, y, scaler = load_data('lendingclub', is_tree=False, scaler_type='standardize') 
   x = np.concatenate([x, np.zeros((x.shape[0], 1))], axis=1).astype(np.float32)
   
   flow = RealNVP(x.shape[1], device) 
-  flow.load_state_dict(torch.load(args.model, map_location=device))
+  if device == 'cpu':
+    flow.load_state_dict(torch.load(args.model, map_location='cpu'))
+  else:
+    flow.load_state_dict(torch.load(args.model))
   flow.to(device)
   flow.eval()
-  print(flow.mask)
 
   # produce samples
   x_gen = flow.g(flow.prior.sample((args.n_samples,))).detach().cpu().numpy()[:,:-1]
@@ -161,10 +165,6 @@ if __name__ == '__main__':
 
   df_x = scaler.as_dataframe(x[:,:-1])
   df_gen = scaler.as_dataframe(x_gen)
-
-  print(df_x.head(20))
-  print(df_gen.head(20).iloc[:,:17])
-  print(df_gen.head(20).iloc[:, 17:])
 
   # reconstruction quality ---------------------
   if args.quality:
@@ -192,17 +192,18 @@ if __name__ == '__main__':
   bst = xgb.train(param, xgb.DMatrix(x[:num_train], label=y[:num_train]), num_round)
   pred_val = bst.predict(xgb.DMatrix(x[num_train:]))
   val_auc = roc_auc_score(y[num_train:], pred_val)
-  print('auc score on val set: {:.03f}'.format(val_auc))
+  print('\nAUC score on val set: {:.03f}'.format(val_auc))
 
   pred_fn = lambda x: bst.predict(xgb.DMatrix(x))
   shap_fn = lambda x: bst.predict(xgb.DMatrix(x), pred_contribs=True)
   inf_fn = lambda x: flow.f(torch.from_numpy(x.astype(np.float32)).to(device))[0].detach().cpu().numpy()
   gen_fn = lambda z: flow.g(torch.from_numpy(z.astype(np.float32)).to(device)).detach().cpu().numpy()
+  logp_fn = lambda x: flow.log_prob(torch.from_numpy(x.astype(np.float32)).to(device)).detach().cpu().numpy()
 
   if args.sensitivity: 
     i = num_train+1
-    noise_sd = 0.01
-    n_nbhrs = 100
+    noise_sd = 0.1
+    n_nbhrs = 200
     x_test = x[i][None,:]
     z_test = inf_fn(x_test) 
     z_nbhr = z_test + noise_sd * np.random.randn(n_nbhrs, x.shape[1]).astype(np.float32)
@@ -219,9 +220,9 @@ if __name__ == '__main__':
     sensitivity = scaler.columns[np.argsort(-np.abs(mod.coef_[:-1]))][:10]
 
     shap = scaler.columns[np.argsort(-np.abs(shap_values))][:10]
-    print('sensitivity top 10')
+    print('\nSensitivity top 10')
     print(sensitivity)
-    print('shap top 10')
+    print('\nShap top 10')
     print(shap)
 
   if args.improvement:
@@ -242,9 +243,21 @@ if __name__ == '__main__':
     x_path = gen_fn(z_path)
     score_path = pred_fn(x_path)
 
-    print(drop_static(un_ohe(scaler.as_dataframe(x_path[:,:-1]), scaler)))
-    plt.plot(alpha, score_path, '.-')
+    norm = lambda x: np.sqrt(np.sum(x**2, axis=1))
+    delta = norm(x_path - x_path[0][None,:])/norm(x_path[0][None,:])
+    improvement_plan = drop_static(un_ohe(scaler.as_dataframe(x_path[:,:-1]), scaler))
+    print(improvement_plan)
+
+    plt.plot(delta, score_path, '.-')
     plt.title('Score improvement plan for sample {:d}'.format(rej_idx))
     plt.ylabel('XGB model score')
+    plt.xlabel('$||\Delta x|| / ||x||$')
+
+  if args.likelihood:
+    y_pred = pred_fn(x)
+    should_approve = y == 1
+    pred_err = 1 - y_pred[should_approve]
+    logp = logp_fn(x[should_approve])
+    plt.plot(-logp, pred_err, '.')
 
   plt.show()
