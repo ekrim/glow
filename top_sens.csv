@@ -1,0 +1,6 @@
+,Sensitivity,Feature
+annual_inc,0.069,65000.0
+revol_bal,-0.029,3606.0
+loan_amnt,0.021,8800.0
+emp_length_yrs,0.02,8.0
+int_rate,-0.02,0.06

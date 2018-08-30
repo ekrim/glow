@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import xgboost as xgb
 from sklearn.metrics import roc_auc_score
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LinearRegression
 import torch
 import torch.nn as nn
 
@@ -39,22 +39,6 @@ def mean_sd(df_x, df_gen):
     'err %': std_err})).round({'data std': 2, 'synth std': 2, 'err %': 0})
 
   return df_mean, df_std
-
-
-def negative_check(df):
-  return (df < 0).sum()
-
-
-def categorical_check(df, scaler):
-  good_ohe = []
-  pref_list = []
-  for cat_idx in scaler.cat_cols:
-    good_ohe += [((np.abs(df.iloc[:, cat_idx].round(0) - 0) > 0.0001).sum(axis=1) == len(cat_idx)-1).sum()]
-
-    pref_list += [get_pref(scaler.columns[cat_idx])[0].rstrip('_')]
-
-  pct_good = 100*(df.shape[0] - np.array(good_ohe))/df.shape[0]
-  return pd.DataFrame(OrderedDict({'var pref': pref_list, '% good OHEu': pct_good})).round(0)
 
 
 def fix_df(x, scaler, return_numpy=False):
@@ -176,7 +160,6 @@ if __name__ == '__main__':
   parser.add_argument('--quality', action='store_true', help='run reconstruction quality tests')
   parser.add_argument('--sensitivity', action='store_true', help='run sensitivity demo')
   parser.add_argument('--improvement', action='store_true', help='run score improvement demo')
-  parser.add_argument('--likelihood', action='store_true', help='run log likelihood monitoring demo')
   
   args = parser.parse_args(sys.argv[1:])
 
@@ -221,30 +204,67 @@ if __name__ == '__main__':
   gen_fn = lambda z: flow.g(torch.from_numpy(z.astype(np.float32)).to(device)).detach().cpu().numpy()
   logp_fn = lambda x: flow.log_prob(torch.from_numpy(x.astype(np.float32)).to(device)).detach().cpu().numpy()
 
+
   if args.sensitivity: 
-    i = num_train+1
     noise_sd = 0.1
-    n_nbhrs = 200
+    n_nbhrs = 40
+
+    i = np.random.randint(num_train, x.shape[0], 1)[0]
+
+    print('\nSensitivity for sample {:d}'.format(i))
     x_test = x[i][None,:]
     z_test = inf_fn(x_test) 
-    z_nbhr = z_test + noise_sd * np.random.randn(n_nbhrs, x.shape[1]).astype(np.float32)
-    x_nbhr = gen_fn(z_nbhr) 
+    z_nbhr = z_test + noise_sd * np.random.randn(n_nbhrs, z_test.shape[1]).astype(np.float32)
+    x_nbhr = gen_fn(z_nbhr)
+    
+    def fixer(x, scaler):
+      """Make fixed np array that is standardized"""
+      x_new = fix_df(x[:,:-1], scaler, return_numpy=True)
+      x_new = scaler.transform(x_new)
+      return np.concatenate([x_new, np.zeros((x_new.shape[0],1), dtype=np.float32)], axis=1)
+
+    x_nbhr = fixer(x_nbhr, scaler)
+      
     pred_nbhr = pred_fn(x_nbhr)
     pred_test = pred_fn(x_test)
     shap_values = shap_fn(x_test)[0][:-2]
 
-    # PI
+    best_idx_shap = np.argsort(-np.abs(shap_values))[:10]
+     
+    the_crew_np = np.concatenate([x_test, x_nbhr], axis=0)[:, :-1] 
+    the_crew = drop_static(un_ohe(scaler.as_dataframe(the_crew_np), scaler))
+    
+    col_list = list(scaler.columns)
+    vals = []
+    for col in the_crew.columns:
+      i_col = col_list.index(col) 
+      
+      mod = LinearRegression(fit_intercept=True, normalize=False)
+      mod.fit(the_crew_np[:, i_col][:,None], np.append(pred_test, pred_nbhr))
+      vals += [mod.coef_[0]]
+    
+    vals = np.array(vals)
+    best_idx = np.argsort(-np.abs(vals))
+    to_show = np.min([len(best_idx), 5])
+    best_idx = best_idx[:to_show]
+    
+    cols_to_use = the_crew.columns[best_idx]
+    df_sens = pd.DataFrame(OrderedDict({
+      'Sensitivity': vals[best_idx],
+      'Feature': df_x.loc[i, cols_to_use]}), index=cols_to_use).round({'Sensitivity': 3, 'Feature': 2})
 
-    # LIME
-    mod = Ridge(alpha=0.1, fit_intercept=True, normalize=True)
-    mod.fit(x_nbhr, pred_nbhr.flatten())
-    sensitivity = scaler.columns[np.argsort(-np.abs(mod.coef_[:-1]))][:10]
+    best_idx_shap = best_idx_shap[:to_show]
+    cols_to_use = scaler.columns[best_idx_shap]
+    df_shap = pd.DataFrame(OrderedDict({
+      'Shapley': shap_values[best_idx_shap],
+      'Feature': df_x.loc[i, cols_to_use]}), index=cols_to_use).round({'Shapley': 3, 'Feature': 2})
+    
+    print('Score for sample: {:.03f}'.format(pred_test[0]))
+    df_sens.to_csv('top_sens.csv')
+    df_shap.to_csv('top_shap.csv')
+    print(df_sens)
+    print(df_shap)
 
-    shap = scaler.columns[np.argsort(-np.abs(shap_values))][:10]
-    print('\nSensitivity top 10')
-    print(sensitivity)
-    print('\nShap top 10')
-    print(shap)
 
   if args.improvement:
     z = inf_fn(x)
@@ -275,12 +295,5 @@ if __name__ == '__main__':
     plt.title('Score improvement plan for sample {:d}'.format(rej_idx))
     plt.ylabel('XGB model score')
     plt.xlabel('$||\Delta x|| / ||x||$')
-
-  if args.likelihood:
-    y_pred = pred_fn(x)
-    should_approve = y == 1
-    pred_err = 1 - y_pred[should_approve]
-    logp = logp_fn(x[should_approve])
-    plt.plot(-logp, pred_err, '.')
 
   plt.show()

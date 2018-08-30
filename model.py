@@ -31,7 +31,6 @@ class RealNVP(nn.Module):
 
     if dim_in > 2:
       masks = torch.from_numpy(np.random.randint(0, 2, (n_mask, dim_in)).astype(np.float32))
-      print(masks)
     else:
       masks = torch.from_numpy(np.array([[0, 1], [1, 0]] * 3).astype(np.float32))
 
