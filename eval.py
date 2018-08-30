@@ -17,7 +17,6 @@ from model import RealNVP
 
 
 def mean_sd(df_x, df_gen):
-
   df_x = df_x.iloc[:,:17]
   df_gen = df_gen.iloc[:,:17]
 
@@ -56,6 +55,27 @@ def categorical_check(df, scaler):
 
   pct_good = 100*(df.shape[0] - np.array(good_ohe))/df.shape[0]
   return pd.DataFrame(OrderedDict({'var pref': pref_list, '% good OHEu': pct_good})).round(0)
+
+
+def fix_df(x, scaler, return_numpy=False):
+  x = scaler.inverse_transform(x.copy())
+  for cat_idx in scaler.cat_cols:
+    if len(cat_idx) == 1:
+      x[:, cat_idx] = (x[:,cat_idx] > 0.5).astype(np.float32)
+    else:
+      new_ohe = np.zeros((x.shape[0], len(cat_idx)), dtype=np.float32)
+      new_ohe[np.arange(x.shape[0]), np.argmax(x[:, cat_idx], axis=1)] = 1.0
+      x[:, cat_idx] = new_ohe
+
+  # delinq_2yrs, inq, mths, mths, open
+  for i in [5, 6, 7, 8, 9, 10, 12, 16]:
+    x[x[:,i] < 0, i] = 0.0
+    x[:, i] = np.round(x[:, i])
+
+  if return_numpy:
+    return x
+  else: 
+    return pd.DataFrame(x, columns=scaler.columns)
 
 
 def un_ohe(df, scaler):
@@ -125,13 +145,28 @@ def payment_error(df):
     r /= 12
     return p*(r*(1+r)**n)/((1+r)**n - 1) 
   
-  term = np.array([36 if t36 >= t60 else 60 for t36, t60 in zip(df['term_60months'], df['term_36months'])])
+  term = np.array([36 if t36 >= t60 else 60 for t60, t36 in zip(df['term_60months'], df['term_36months'])])
   calc = payment(df['loan_amnt'], df['int_rate'], term)
+
+  df_payment = pd.DataFrame({'Synth installment': df['installment'], 'Calc installment': calc})
+  df_payment.to_csv('installment.csv', index=False)
 
   error = 100* (calc - df['installment'])/calc
   fig = plt.figure(2)
   error.plot.hist(ax=fig.gca(), title='% error in payment calculation', range=[-100, 100], bins=50)
   plt.xlabel('%')
+
+
+def quality_test(df_x, df_gen, scaler):
+  # check means vs. sd
+  df_mean, df_sd = mean_sd(df_x, df_gen)
+  print(df_mean)
+  df_mean.to_csv('mean.csv')
+  print(df_sd)
+  df_sd.to_csv('std.csv')
+
+  categorical_hist(df_x, df_gen, scaler)
+  payment_error(df_gen)
 
 
 if __name__ == '__main__':
@@ -152,7 +187,7 @@ if __name__ == '__main__':
   x = np.concatenate([x, np.zeros((x.shape[0], 1))], axis=1).astype(np.float32)
   
   flow = RealNVP(x.shape[1], device) 
-  if device == 'cpu':
+  if device.type == 'cpu':
     flow.load_state_dict(torch.load(args.model, map_location='cpu'))
   else:
     flow.load_state_dict(torch.load(args.model))
@@ -164,26 +199,12 @@ if __name__ == '__main__':
   np.save('samples.npy', x_gen)
 
   df_x = scaler.as_dataframe(x[:,:-1])
-  df_gen = scaler.as_dataframe(x_gen)
+  df_gen = fix_df(x_gen, scaler) 
 
+  df_gen.to_csv('real.csv')
   # reconstruction quality ---------------------
   if args.quality:
-    # check means vs. sd
-    df_mean, df_sd = mean_sd(df_x, df_gen)
-    print(df_mean)
-    print(df_sd)
-
-    # check negative values
-    print(negative_check(df_gen))
-    
-    # check categorical
-    print(categorical_check(df_gen, scaler))
-
-    # check categorical hist
-    categorical_hist(df_x, df_gen, scaler)
-
-    # check payment calculation error
-    payment_error(df_gen)
+    quality_test(df_x, df_gen, scaler)
 
   # build a model
   param = {'max_depth': 4, 'silent': 1, 'objective': 'binary:logistic'}
@@ -227,9 +248,7 @@ if __name__ == '__main__':
 
   if args.improvement:
     z = inf_fn(x)
-    mean0 = np.mean(z[y==0], axis=0)
     mean1 = np.mean(z[y==1], axis=0)
-    improve_vec = mean1 - mean0
     
     pred = pred_fn(x)
 
@@ -237,15 +256,19 @@ if __name__ == '__main__':
     rej_idx = np.random.choice(lowest_idx)
     z_rej = inf_fn(x[rej_idx][None,:])
     improve_vec = mean1 - z_rej.flatten()
-   
+
+    # to mean
     alpha = np.linspace(0, 0.2, 10)
     z_path = z_rej + alpha[:,None] * improve_vec[None,:]
     x_path = gen_fn(z_path)
+    x_path = fix_df(x_path[:,:-1], scaler, return_numpy=True)
+    x_path = np.concatenate([scaler.transform(x_path), np.zeros((x_path.shape[0], 1), dtype=np.float32)], axis=1)
     score_path = pred_fn(x_path)
 
     norm = lambda x: np.sqrt(np.sum(x**2, axis=1))
     delta = norm(x_path - x_path[0][None,:])/norm(x_path[0][None,:])
     improvement_plan = drop_static(un_ohe(scaler.as_dataframe(x_path[:,:-1]), scaler))
+    improvement_plan.to_csv('improvement_plan.csv', index=False)
     print(improvement_plan)
 
     plt.plot(delta, score_path, '.-')
